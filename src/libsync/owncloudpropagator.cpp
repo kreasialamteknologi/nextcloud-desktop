@@ -448,6 +448,44 @@ void OwncloudPropagator::start(SyncFileItemVector &&items)
             items.end());
     }
 
+    // process each item that is new and is a directory and make sure every parent in its tree has the instruction NEW instead of REMOVE
+    for (const auto &item : items) {
+        if (item->_instruction == CSYNC_INSTRUCTION_NEW && item->_direction == SyncFileItem::Up && item->isDirectory()) {
+            const auto folderPathSplit = item->_file.split(QLatin1String("/"), Qt::SkipEmptyParts);
+            // #1 get root folder name for the current item that we need to reupload
+            const auto itemRootFolderName = folderPathSplit.first();
+            // #2 iterate backwords (for optimization) and find the root folder by name
+            const auto itemRootFolderReverseIt = std::find_if(std::rbegin(items), std::rend(items), [&itemRootFolderName](auto &currentItem) {
+                return currentItem->_instruction == CSYNC_INSTRUCTION_REMOVE && currentItem->_direction == SyncFileItem::Down && currentItem->_file == itemRootFolderName;
+            });
+
+            if (itemRootFolderReverseIt != std::rend(items)) {
+
+                // #3 convert reverse iterator to normal iterator
+                const auto itemFolderIt = (itemRootFolderReverseIt + 1).base();
+
+                // #4 if the root folder is set to be removed, then we will need to fix it by reupload every folder in the tree, including the root
+                if (itemFolderIt != std::end(items) && (*itemFolderIt)->_instruction == CSYNC_INSTRUCTION_REMOVE) {
+                    qCWarning(lcPropagator) << "WARNING:  Job within a removed directory?  This should not happen! But, we are going to reupload the entire folder structure."
+                                            << item->_file << item->_instruction;
+
+                    auto nextFolderInTreeIt = itemFolderIt;
+                    do {
+                        // #5 Iterate forward from the root until the item that we wanted to reupload, and make sure every folder is set to reupload too
+                        if ((*nextFolderInTreeIt)->isDirectory()
+                            && (*nextFolderInTreeIt)->_instruction == CSYNC_INSTRUCTION_REMOVE
+                            && (*nextFolderInTreeIt)->_direction == SyncFileItem::Down
+                            && item->_file.startsWith((*nextFolderInTreeIt)->_file)) {
+                                (*nextFolderInTreeIt)->_instruction = CSYNC_INSTRUCTION_NEW;
+                                (*nextFolderInTreeIt)->_direction = SyncFileItem::Up;
+                        }
+                        ++nextFolderInTreeIt;
+                    } while (nextFolderInTreeIt != std::end(items) && (*nextFolderInTreeIt)->_file != item->_file);
+                }
+            }
+        }
+    }
+
     resetDelayedUploadTasks();
     _rootJob.reset(new PropagateRootDirectory(this));
     QStack<QPair<QString /* directory name */, PropagateDirectory * /* job */>> directories;
